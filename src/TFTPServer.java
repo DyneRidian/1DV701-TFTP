@@ -1,3 +1,4 @@
+import java.io.File;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -10,8 +11,8 @@ public class TFTPServer
 {
 	public static final int TFTPPORT = 4970;
 	public static final int BUFSIZE = 516;
-	public static final String READDIR = "/home/username/read/"; //custom address at your PC
-	public static final String WRITEDIR = "/home/username/write/"; //custom address at your PC
+	public static final String READDIR = "read/"; //custom address at your PC
+	public static final String WRITEDIR = "write/"; //custom address at your PC
 	// OP codes
 	public static final int OP_RRQ = 1;
 	public static final int OP_WRQ = 2;
@@ -23,7 +24,11 @@ public class TFTPServer
 	public static int opcode;
 	public static String params;
 	
+	// requestedFile variable moved to fields to allow access in ParseRQ method
+	public StringBuffer requestedFile;
+	
 	public static void main(String[] args) {
+		
 		if (args.length > 0) 
 		{
 			System.err.printf("usage: java %s\n", TFTPServer.class.getCanonicalName());
@@ -63,8 +68,7 @@ public class TFTPServer
 				continue;
 			}
 
-			final StringBuffer requestedFile= new StringBuffer();
-			final int reqtype = ParseRQ(buf, requestedFile);
+			final int reqtype = ParseRQ(buf);
 			
 			new Thread() 
 			{
@@ -80,17 +84,43 @@ public class TFTPServer
 						System.out.printf("%s request for %s from %s using port %d\n",
 								(reqtype == OP_RRQ)?"Read":"Write",
 										requestedFile, clientAddress.getHostName(), clientAddress.getPort());  
-								
+						
 						// Read request
 						if (reqtype == OP_RRQ) 
 						{      
 							requestedFile.insert(0, READDIR);
+							
+							/*try {
+								File file = new File(requestedFile.toString());
+								
+								if(file.exists()){
+									
+									
+									
+								}
+							} catch (Exception e) {
+								e.printStackTrace();
+							}*/
+							
 							HandleRQ(sendSocket, requestedFile.toString(), OP_RRQ);
 						}
 						// Write request
 						else 
 						{                       
 							requestedFile.insert(0, WRITEDIR);
+							
+							/**try {
+								File file = new File(requestedFile.toString());
+								
+								if(!file.exists()){
+									
+									file.createNewFile();
+									
+								}
+							} catch (Exception e) {
+								e.printStackTrace();
+							}*/
+							
 							HandleRQ(sendSocket,requestedFile.toString(),OP_WRQ);  
 						}
 						sendSocket.close();
@@ -140,21 +170,53 @@ public class TFTPServer
 	 * @param requestedFile (name of file to read/write)
 	 * @return opcode (request type: RRQ or WRQ)
 	 */
-	private int ParseRQ(byte[] buf, StringBuffer requestedFile) 
+	private int ParseRQ(byte[] buf) 
 	{
-		// See "TFTP Formats" in TFTP specification for the RRQ/WRQ request contents
-		
+		// ByteBuffer used to get the first 2 bytes and convert it a short which represents the opcode.
 		ByteBuffer wrap = ByteBuffer.wrap(buf);
-		
 		short opcode = wrap.getShort();
 		
 		System.out.println("Opcode: " + opcode);
 		
-		String fileName = new String(buf, 2 , 512 - 2);
+		int nameLength = 0;
 		
+		// for loop to find the where in the byte array the name of the requested file ends.
+		for(int i=2;i<buf.length;i++){
+			
+			// if element is == 0 then the name of the requested file has ended.
+			if(buf[i] == 0) {
+				
+				nameLength = i;
+				i=buf.length;
+			}
+			
+		}
+		
+		// create a string which contains the name of the requested file using variable found in for loop to locate end.
+		String fileName = new String(buf, 2 , nameLength-2);
+		
+		int transferTypeLength = 0;
+		
+		// for loop to find where in the bite array the transfer type ends.
+		for(int i=nameLength+1;i<buf.length;i++){
+			
+			// if element is 0 we have found the length of the transfer type
+			if(buf[i] == 0) {
+				
+				transferTypeLength = i;
+				i=buf.length;
+			}
+			
+		}
+		
+		// create string which contains name of the transfer type using variables found in for loop to locate
+		String transferType = new String(buf, nameLength+1, transferTypeLength-nameLength-1);
+		
+		// set name of requested file to be used in the run method
 		requestedFile = new StringBuffer(fileName);
 		
 		System.out.println(requestedFile);
+		System.out.println(transferType);
 		
 		return opcode;
 	}
