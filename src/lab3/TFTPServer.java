@@ -3,6 +3,7 @@ package lab3;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -12,6 +13,7 @@ import java.net.SocketException;
 import java.nio.ByteBuffer;
 
 public class TFTPServer {
+	public DatagramPacket previous_package = null;
 	public static final int TFTPPORT = 4970;
 	public static final int BUFSIZE = 516;
 	public static final int MAX_PACKET_SIZE = 1024;
@@ -33,7 +35,6 @@ public class TFTPServer {
 	public static StringBuffer requestedFile;
 	public String transferMode;
 	public static int opcode;
-	public static String params;
 	public static int currentSize = 0;
 
 	public static void main(String[] args) {
@@ -121,8 +122,6 @@ public class TFTPServer {
 		// Receive packet
 
 		try {
-			// socket.setSoTimeout(10);
-
 			System.out.println("Receiving..");
 			socket.receive(receivePackage);
 			System.out.println("Received!");
@@ -204,6 +203,16 @@ public class TFTPServer {
 
 		return opcode;
 	}
+	
+	private void previous_Package(DatagramPacket currentPackage, int opcode){
+		if(opcode == OP_RRQ){
+			System.out.println("Read package!");
+			this.previous_package = currentPackage;
+		}else{
+			System.out.println("Write package!");
+			this.previous_package = currentPackage;
+		}
+	}
 
 	/**
 	 * Handles RRQ and WRQ requests
@@ -216,6 +225,9 @@ public class TFTPServer {
 	 *            (RRQ or WRQ)
 	 */
 	private void HandleRQ(DatagramSocket sendSocket, String requestedFile, int opcode) {
+		// Response buffer
+		byte[] response = new byte[MAX_PACKET_SIZE];
+		
 		if (opcode == OP_RRQ) {
 			try{
 				// Create file to read from requested file
@@ -224,8 +236,6 @@ public class TFTPServer {
 				// holding the content
 				FileInputStream stream = new FileInputStream(file);
 
-				// Response buffer
-				byte[] response = new byte[MAX_PACKET_SIZE];
 				byte[] temp = new byte[BUFSIZE - 4];
 				// not needed only for testing purpose
 				// temp = requestedFile.getBytes();
@@ -266,7 +276,18 @@ public class TFTPServer {
 				e.printStackTrace();
 			}
 		} else if (opcode == OP_WRQ) {
-			boolean result = receive_DATA_send_ACK(params);
+			File createFile = new File(requestedFile);
+			
+			if(createFile.exists() && !createFile.isDirectory()){
+				send_ERR(sendSocket, (short) 6, TFTP_ERROR_6);
+				System.out.println("File already exist!");
+			} else {
+				boolean result = receive_DATA_send_ACK(sendSocket, response, createFile);
+				
+				if(!result){
+					send_ERR(sendSocket, (short) 0, TFTP_ERROR_0);
+				}
+			}
 		} else {
 			System.err.println("Invalid request. Sending an error packet.");
 			// See "TFTP Formats" in TFTP specification for the ERROR packet
@@ -309,6 +330,7 @@ public class TFTPServer {
 			DatagramPacket recievedACK = new DatagramPacket(received, received.length);
 
 			sendSocket.send(sendPackage);
+			previous_Package(sendPackage, OP_RRQ);
 
 			if (buf[1] == OP_DAT) {
 				sendSocket.receive(recievedACK);
@@ -317,6 +339,7 @@ public class TFTPServer {
 
 				return true;
 			} else {
+				System.err.println("Could not send data!");
 				return false;
 			}
 		} catch (IOException e) {
@@ -326,7 +349,42 @@ public class TFTPServer {
 		}
 	}
 
-	private boolean receive_DATA_send_ACK(String params) {
+	private boolean receive_DATA_send_ACK(DatagramSocket sendSocket, byte[] buf, File file) {
+		byte[] data = new byte[BUFSIZE - 4];
+		DatagramPacket receivePackage = new DatagramPacket(data, data.length);
+		System.out.println("Hello");
+		
+		try{
+			FileOutputStream stream  = new FileOutputStream(file);
+			// For the ACK package need only 4 bytes, two for opcode and two for
+			// block code
+			byte[] send = new byte[4];
+			DatagramPacket sendACK = new DatagramPacket(send, send.length);
+			ByteBuffer wrap = ByteBuffer.wrap(send);
+			wrap.putShort((short) OP_ACK);
+			wrap.putShort((short) 0);
+
+			sendSocket.send(sendACK);
+			
+			sendSocket.receive(receivePackage);
+			previous_Package(receivePackage, OP_WRQ);
+			ByteBuffer receive = ByteBuffer.wrap(data);
+			short opcode = receive.getShort();
+			short block = receive.getShort();
+			System.out.println("opcode "+ opcode);
+			System.out.println("block: " +block);
+
+			String rec = new String(data, 4, data.length - 4);
+			stream.write(data, 4, data.length - 4);
+			System.out.println(rec);
+
+			stream.close();
+			
+		} catch(IOException e){
+			e.getMessage();
+			return false;
+		}
+		
 		return true;
 	}
 
