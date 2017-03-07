@@ -11,12 +11,11 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.TimeUnit;
 
 public class TFTPServer {
-	public DatagramPacket previous_package = null;
 	public static final int TFTPPORT = 4970;
 	public static final int BUFSIZE = 516;
-	public static final int MAX_PACKET_SIZE = 1024;
 	public static final String READDIR = "Directory/ReadDir/"; // custom address at your PC
 	public static final String WRITEDIR = "Directory/WriteDir/"; 
 	public static final int OP_RRQ = 1;
@@ -30,13 +29,22 @@ public class TFTPServer {
 	public static final String TFTP_ERROR_2 = "Access violation";
 	public static final String TFTP_ERROR_6 = "File already exists";
 
+	public DatagramPacket previous_package = null;
 	public static InetSocketAddress socketAddress;
 	// requestedFile variable moved to fields to allow access in ParseRQ method
 	public static StringBuffer requestedFile;
 	public String transferMode;
 	public static int opcode;
 	public static int currentSize = 0;
+	public int lastPackage_length = BUFSIZE;	
+	public short block = 1;
 
+	public boolean endHandling = false;
+	public boolean endHandlingFlag = false;
+	private int timesRetransmitted = 0;
+	private int max;
+	private final int ACKTIME = 3;
+	
 	public static void main(String[] args) {
 		if (args.length > 0) {
 			System.err.printf("usage: java %s\n", TFTPServer.class.getCanonicalName());
@@ -91,6 +99,7 @@ public class TFTPServer {
 						if (reqtype == OP_RRQ) {
 							requestedFile.insert(0, READDIR);
 							HandleRQ(sendSocket, requestedFile.toString(), OP_RRQ);
+							System.out.println("Handle method done!");
 						}
 						// Write request
 						else {
@@ -124,7 +133,6 @@ public class TFTPServer {
 		try {
 			System.out.println("Receiving..");
 			socket.receive(receivePackage);
-			System.out.println("Received!");
 
 			socketAddress = new InetSocketAddress(receivePackage.getAddress(), receivePackage.getPort());
 
@@ -203,16 +211,6 @@ public class TFTPServer {
 
 		return opcode;
 	}
-	
-	private void previous_Package(DatagramPacket currentPackage, int opcode){
-		if(opcode == OP_RRQ){
-			System.out.println("Read package!");
-			this.previous_package = currentPackage;
-		}else{
-			System.out.println("Write package!");
-			this.previous_package = currentPackage;
-		}
-	}
 
 	/**
 	 * Handles RRQ and WRQ requests
@@ -226,7 +224,7 @@ public class TFTPServer {
 	 */
 	private void HandleRQ(DatagramSocket sendSocket, String requestedFile, int opcode) {
 		// Response buffer
-		byte[] response = new byte[MAX_PACKET_SIZE];
+		byte[] response = new byte[BUFSIZE];
 		
 		if (opcode == OP_RRQ) {
 			try{
@@ -235,7 +233,8 @@ public class TFTPServer {
 				// File input stream to read bytes into the temporary buffer
 				// holding the content
 				FileInputStream stream = new FileInputStream(file);
-
+				
+				byte[] data = new byte[(int) file.length()+1];
 				byte[] temp = new byte[BUFSIZE - 4];
 				// not needed only for testing purpose
 				// temp = requestedFile.getBytes();
@@ -245,54 +244,105 @@ public class TFTPServer {
 				 * order to see the output
 				 */
 				try {
-					//int byteRead = 0;
-					//Read 
-					stream.read(temp, 0, temp.length);
-					/*for (int i = 0; i < temp.length; i++) {
-						if ((byteRead = stream.read(temp)) != -1) {
-							String read = new String(temp, 0, byteRead);
-							System.out.println(read);
+					//Read
+					stream.read(data);		
+					while(!endHandling){
+						
+						int tempCounter = 0;
+						
+						for(int i = temp.length*(block-1); i < temp.length*block; i++){
+							
+							if(data[i] == 0){
+								endHandlingFlag = true;
+								lastPackage_length = tempCounter + 4;
+								break;
+							}
+							
+							temp[tempCounter] = data[i];
+							tempCounter++;
+							
 						}
-					}*/
-					
-					String read = new String(temp);
-					System.out.println(read);
-					// See "TFTP Formats" in TFTP specification for the DATA and ACK
-					// packet contents
-					boolean result = send_DATA_receive_ACK(sendSocket, response, temp,(short) 1);
-
-					// Presumably if result returns false we will send a error 
-					if (!result) {
-						send_ERR(sendSocket,(short) 0, TFTP_ERROR_0);
+						
+						tempCounter = 0;
+						
+						// See "TFTP Formats" in TFTP specification for the DATA and ACK
+						// packet contents
+						boolean result = send_DATA_receive_ACK(sendSocket, response, temp, this.block);
+						
+						temp = new byte[BUFSIZE - 4];
+	
+						// Presumably if result returns false we will send a error 
+						if (!result) {
+							max++;
+							if(max>=5){
+								TimeUnit.MILLISECONDS.sleep(5);
+								send_ERR(sendSocket,(short) 0, TFTP_ERROR_0);
+								endHandling = true;
+								// delay before end
+							}
+						}
 					}
-
-					stream.close();
+					
+					System.out.println(timesRetransmitted);
+					endHandling = false;
+					endHandlingFlag = false;
+					lastPackage_length = BUFSIZE;
+					stream.close();	
 				} catch (IOException e) {
 					send_ERR(sendSocket,(short) 0, TFTP_ERROR_0);
 					e.printStackTrace();
+				} catch (InterruptedException e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
 				}
-			}catch (FileNotFoundException e) {
+				
+			} catch (FileNotFoundException e) {
 				send_ERR(sendSocket,(short) 1, TFTP_ERROR_1);
 				e.printStackTrace();
 			}
+
 		} else if (opcode == OP_WRQ) {
 			File createFile = new File(requestedFile);
-			
-			if(createFile.exists() && !createFile.isDirectory()){
-				send_ERR(sendSocket, (short) 6, TFTP_ERROR_6);
-				System.out.println("File already exist!");
-			} else {
-				boolean result = receive_DATA_send_ACK(sendSocket, response, createFile);
-				
-				if(!result){
-					send_ERR(sendSocket, (short) 0, TFTP_ERROR_0);
+			FileOutputStream stream;
+			try {
+				if(createFile.exists() && !createFile.isDirectory()){
+					send_ERR(sendSocket, (short) 6, TFTP_ERROR_6);
+					System.out.println("File already exist!");
+				} else {
+					stream = new FileOutputStream(createFile);
+					
+					while(!endHandling){
+						boolean result = receive_DATA_send_ACK(sendSocket, response, stream);
+
+						if(!result){
+							max++;
+							if(max>=5){
+								TimeUnit.MILLISECONDS.sleep(5);
+								send_ERR(sendSocket,(short) 0, TFTP_ERROR_0);
+								endHandling = true;
+								// delay before end
+							}
+						}
+						
+						response = new byte[BUFSIZE];
+					}
+
+					System.out.println(timesRetransmitted);
+					endHandling = false;
+					endHandlingFlag = false;
+					lastPackage_length = BUFSIZE;
+					stream.close();
 				}
+			} catch (IOException e) {
+				send_ERR(sendSocket,(short) 0, TFTP_ERROR_0);
+				e.printStackTrace();
+			} catch (InterruptedException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
 			}
 		} else {
-			System.err.println("Invalid request. Sending an error packet.");
-			// See "TFTP Formats" in TFTP specification for the ERROR packet
-			// contents
-			send_ERR(sendSocket,(short) 1, TFTP_ERROR_0);
+			System.err.println("Access violation!");
+			send_ERR(sendSocket,(short) 2, TFTP_ERROR_2);
 			return;
 		}
 	}
@@ -304,25 +354,25 @@ public class TFTPServer {
 		// short value for 2 bytes
 		short shortVal = OP_DAT;
 		short val = block;
-		System.out.println(shortVal);
-		System.out.println(block);
 
 		// Allocating to the buf
 		ByteBuffer wrap = ByteBuffer.wrap(buf);
 		// put the short to the bytebuffer
 		wrap.putShort(shortVal);
 		wrap.putShort(val);
-		System.out.println("length: " + data.length);
 		wrap.put(data);
-
-		// Checks index and remaining space
-		System.out.println(wrap.position());
-		System.out.println(wrap.remaining());
-
-		String send = new String(buf);
-		System.out.println(send);
+		
+		if(!endHandlingFlag){
+			String send = new String(buf,4,BUFSIZE-4);
+			System.out.println(send + "\n");
+		}
+		else if(endHandlingFlag){
+			String send = new String(buf, 4, lastPackage_length-4);
+			System.out.println(send + "\n");
+		}
+			
 		// Send package
-		DatagramPacket sendPackage = new DatagramPacket(wrap.array(), wrap.array().length);
+		DatagramPacket sendPackage = new DatagramPacket(wrap.array(), lastPackage_length);
 		try {
 			// For the ACK package need only 4 bytes, two for opcode and two for
 			// block code
@@ -330,15 +380,32 @@ public class TFTPServer {
 			DatagramPacket recievedACK = new DatagramPacket(received, received.length);
 
 			sendSocket.send(sendPackage);
-			previous_Package(sendPackage, OP_RRQ);
-
-			if (buf[1] == OP_DAT) {
-				sendSocket.receive(recievedACK);
-				String rec = new String(received);
-				System.out.println(rec);
-
+			sendSocket.setSoTimeout(ACKTIME);
+			try{
+			sendSocket.receive(recievedACK);
+			} catch(IOException e){
+				timesRetransmitted++;
+				e.printStackTrace();
+				return false;
+			}
+			if(received[1] == 4){
+				if(this.block == received[3]){
+					System.out.println("Acknowledgment: block " + block + " received");
+					this.block++;
+					this.max = 0;
+				}
+				else{
+					timesRetransmitted++;
+				}
+				
+				
+				if(endHandlingFlag){
+					endHandling = true;
+					this.block = 1;
+				}
 				return true;
-			} else {
+			}
+			else {
 				System.err.println("Could not send data!");
 				return false;
 			}
@@ -349,46 +416,85 @@ public class TFTPServer {
 		}
 	}
 
-	private boolean receive_DATA_send_ACK(DatagramSocket sendSocket, byte[] buf, File file) {
-		byte[] data = new byte[BUFSIZE - 4];
-		DatagramPacket receivePackage = new DatagramPacket(data, data.length);
-		System.out.println("Hello");
+	private boolean receive_DATA_send_ACK(DatagramSocket sendSocket, byte[] buf, FileOutputStream file) {
+		DatagramPacket receivePackage = new DatagramPacket(buf, buf.length);
 		
 		try{
-			FileOutputStream stream  = new FileOutputStream(file);
-			// For the ACK package need only 4 bytes, two for opcode and two for
-			// block code
-			byte[] send = new byte[4];
-			DatagramPacket sendACK = new DatagramPacket(send, send.length);
-			ByteBuffer wrap = ByteBuffer.wrap(send);
-			wrap.putShort((short) OP_ACK);
-			wrap.putShort((short) 0);
-
-			sendSocket.send(sendACK);
+			if(this.block == 1){
+				// For the ACK package need only 4 bytes, two for opcode and two for block code
+				byte[] start = new byte[4];
+				DatagramPacket startACK = new DatagramPacket(start, start.length);
+				ByteBuffer wrap = ByteBuffer.wrap(start);
+				wrap.putShort((short) OP_ACK);
+				wrap.putShort((short) 0);
+				sendSocket.send(startACK);
+			}
 			
+			sendSocket.setSoTimeout(5);
+			sendSocket.setSoTimeout(ACKTIME);
+			try{
 			sendSocket.receive(receivePackage);
-			previous_Package(receivePackage, OP_WRQ);
-			ByteBuffer receive = ByteBuffer.wrap(data);
-			short opcode = receive.getShort();
-			short block = receive.getShort();
-			System.out.println("opcode "+ opcode);
-			System.out.println("block: " +block);
+			} catch(IOException e){
+				timesRetransmitted++;
+				e.printStackTrace();
+				return false;
+			}
+			System.out.println("NULL=?" + buf[buf.length - 1]);
+			if(buf[3] == this.block){
+				// For the ACK package need only 4 bytes, two for opcode and two for block code
+				byte[] send = new byte[4];
+				DatagramPacket dataACK = new DatagramPacket(send, send.length);
+				ByteBuffer wrap2 = ByteBuffer.wrap(send);
+				wrap2.putShort((short) OP_ACK);
+				wrap2.putShort((short) this.block);
+				
+				if(buf[buf.length - 1] == 0){
+					System.out.println("IS THIS IT?");
+					
+					for(int i = 4; i < buf.length - 4; i++){
+						if(buf[i] == 0){
+							lastPackage_length = i - 1;
+						}
+					}
+					endHandling = true;
+					this.block = 1;
 
-			String rec = new String(data, 4, data.length - 4);
-			stream.write(data, 4, data.length - 4);
-			System.out.println(rec);
+					sendSocket.send(dataACK);
+				}
 
-			stream.close();
-			
+				ByteBuffer receive = ByteBuffer.wrap(buf);
+				short opcode = receive.getShort();
+				short block = receive.getShort();
+
+				System.out.println("opcode "+ opcode);
+				System.out.println("block: " +block);
+				if(opcode == OP_WRQ){
+					System.err.println("Not write request..");
+					return false;
+				}else{
+					String rec = new String(buf, 4, lastPackage_length - 4);
+					file.write(buf, 4, lastPackage_length - 4);
+					System.out.println(rec);
+
+					this.block++;
+					this.max = 0;
+
+					sendSocket.send(dataACK);
+					return true;	
+				}
+			} else {
+				timesRetransmitted++;
+
+				return false;
+			}
 		} catch(IOException e){
 			e.getMessage();
 			return false;
 		}
-		
-		return true;
 	}
 
 	private void send_ERR(DatagramSocket sendSocket, short errorcode, String errormsg) {
+		System.out.println("5");
 		byte[] sendError = new byte[BUFSIZE - 4];
 		// short value for 2 bytes
 		short shortVal = OP_ERR;
